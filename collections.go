@@ -120,6 +120,15 @@ func (ns Nodes) Intersect(other Nodes) Nodes {
 	return s[:count]
 }
 
+func (ns Nodes) Remove(what *Node) Nodes {
+	for i := ns.index(what); i != -1; i = ns.index(what) {
+		copy(ns[i:], ns[i+1:])
+		ns[len(ns)-1] = nil // to prevent any unwanted references so things can be GC'd away
+		ns = ns[:len(ns)-1]
+	}
+	return ns
+}
+
 func (ns Nodes) AllSameGraph() bool {
 	if len(ns) == 0 {
 		return false
@@ -178,15 +187,6 @@ func (ns Nodes) replace(what, with *Node) Nodes {
 		if n == what {
 			ns[i] = with
 		}
-	}
-	return ns
-}
-
-func (ns Nodes) remove(what *Node) Nodes {
-	for i := ns.index(what); i != -1; i = ns.index(what) {
-		copy(ns[i:], ns[i+1:])
-		ns[len(ns)-1] = nil // to prevent any unwanted references so things can be GC'd away
-		ns = ns[:len(ns)-1]
 	}
 	return ns
 }

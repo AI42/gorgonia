@@ -9,6 +9,10 @@ import (
 	"github.com/gonum/graph"
 )
 
+const (
+	changeSetTypeAt = 64 // at 64 elements or more, map[*Node]struct{} is more performant
+)
+
 // a dag is just a holding structure for a directed acyclic graph (of expressions). It's based on the
 // reference implementation of gonum's simple example.
 //
@@ -16,7 +20,7 @@ import (
 type ExprGraph struct {
 	name string
 
-	all Nodes
+	all nodeset
 
 	byHash map[uint32]*Node
 	evac   map[uint32]Nodes
@@ -40,6 +44,7 @@ func WithGraphName(name string) graphconopt {
 // NewGraph creates a new graph. Duh
 func NewGraph(opts ...graphconopt) *ExprGraph {
 	g := &ExprGraph{
+		all:    make(Nodes, 0),
 		byHash: make(map[uint32]*Node),
 		evac:   make(map[uint32]Nodes),
 		to:     make(map[*Node]Nodes),
@@ -96,6 +101,11 @@ func (g *ExprGraph) AddNode(n *Node) (retVal *Node) {
 	}
 
 	g.addToAll(n)
+	if g.all.Len() > changeSetTypeAt {
+		if ns, ok := g.all.(Nodes); ok {
+			g.all = ns.mapSet()
+		}
+	}
 	g.byHash[hash] = n
 	return n
 }
@@ -104,7 +114,7 @@ func (g *ExprGraph) addToAll(n *Node) {
 	if n == nil {
 		panic("HELP! trying to add nil")
 	}
-	g.all = append(g.all, n)
+	g.all = g.all.add(n)
 }
 
 // RemoveNode removes n from the graph, as well as any edges attached to it. If the node
@@ -115,7 +125,7 @@ func (g *ExprGraph) RemoveNode(node graph.Node) {
 
 	delete(g.byHash, hash)
 	delete(g.to, n)
-	g.evac[hash] = g.evac[hash].remove(n)
+	g.evac[hash] = g.evac[hash].Remove(n)
 	g.all = g.all.remove(n)
 }
 
@@ -158,9 +168,18 @@ func (g *ExprGraph) Roots() (retVal Nodes) {
 
 // Inputs returns a list of nodes which are inputs (that is to say, the user is required to set a value in it)
 func (g *ExprGraph) Inputs() (retVal Nodes) {
-	for _, n := range g.all {
-		if n.isInput() {
-			retVal = append(retVal, n)
+	switch all := g.all.(type) {
+	case NodeSet:
+		for n := range all {
+			if n.isInput() {
+				retVal = append(retVal, n)
+			}
+		}
+	case Nodes:
+		for _, n := range all {
+			if n.isInput() {
+				retVal = append(retVal, n)
+			}
 		}
 	}
 	return
@@ -237,34 +256,69 @@ func (g *ExprGraph) ToDot() string {
 	}
 
 	// for _, n := range g.byHash {
-	for _, n := range g.all {
-		group := n.dotCluster()
-		n.dotString(gv, "cluster_"+group)
+	switch all := g.all.(type) {
+	case Nodes:
+		for _, n := range all {
+			group := n.dotCluster()
+			n.dotString(gv, "cluster_"+group)
+		}
+	case NodeSet:
+		for n := range all {
+			group := n.dotCluster()
+			n.dotString(gv, "cluster_"+group)
+		}
 	}
 
-	// for _, from := range g.byHash {
-	for _, from := range g.all {
-		for i, child := range from.children {
-			if ok := g.all.Contains(child); !ok {
-				// not in graph, so ignore it...
-				continue
+	switch all := g.all.(type) {
+	case Nodes:
+		for _, from := range all {
+			for i, child := range from.children {
+				if ok := g.all.Contains(child); !ok {
+					// not in graph, so ignore it...
+					continue
+				}
+				fromID := fmt.Sprintf("Node_%p", from)
+				toID := fmt.Sprintf("Node_%p", child)
+
+				edgeAttrs := gographviz.NewAttrs()
+				edgeAttrs.Add("taillabel", fmt.Sprintf(" %d ", i))
+				edgeAttrs.Add("labelfloat", "false")
+
+				// we invert the from and to nodes for gradients, As the expressionGraph builds upwards from bottom, the gradient builds downwards.
+				if from.group == gradClust && child.group == gradClust {
+					edgeAttrs.Add("dir", "back")
+					gv.AddPortEdge(toID, toID+":anchor:s", fromID, fromID+":anchor:n", true, edgeAttrs)
+				} else {
+					gv.AddPortEdge(fromID, fromID+":anchor:s", toID, toID+":anchor:n", true, edgeAttrs)
+				}
 			}
-			fromID := fmt.Sprintf("Node_%p", from)
-			toID := fmt.Sprintf("Node_%p", child)
+		}
+	case NodeSet:
+		for from := range all {
+			for i, child := range from.children {
+				if ok := g.all.Contains(child); !ok {
+					// not in graph, so ignore it...
+					continue
+				}
+				fromID := fmt.Sprintf("Node_%p", from)
+				toID := fmt.Sprintf("Node_%p", child)
 
-			edgeAttrs := gographviz.NewAttrs()
-			edgeAttrs.Add("taillabel", fmt.Sprintf(" %d ", i))
-			edgeAttrs.Add("labelfloat", "false")
+				edgeAttrs := gographviz.NewAttrs()
+				edgeAttrs.Add("taillabel", fmt.Sprintf(" %d ", i))
+				edgeAttrs.Add("labelfloat", "false")
 
-			// we invert the from and to nodes for gradients, As the expressionGraph builds upwards from bottom, the gradient builds downwards.
-			if from.group == gradClust && child.group == gradClust {
-				edgeAttrs.Add("dir", "back")
-				gv.AddPortEdge(toID, toID+":anchor:s", fromID, fromID+":anchor:n", true, edgeAttrs)
-			} else {
-				gv.AddPortEdge(fromID, fromID+":anchor:s", toID, toID+":anchor:n", true, edgeAttrs)
+				// we invert the from and to nodes for gradients, As the expressionGraph builds upwards from bottom, the gradient builds downwards.
+				if from.group == gradClust && child.group == gradClust {
+					edgeAttrs.Add("dir", "back")
+					gv.AddPortEdge(toID, toID+":anchor:s", fromID, fromID+":anchor:n", true, edgeAttrs)
+				} else {
+					gv.AddPortEdge(fromID, fromID+":anchor:s", toID, toID+":anchor:n", true, edgeAttrs)
+				}
 			}
 		}
 	}
+
+	// for _, from := range g.byHash {
 
 	// draw deriv lines
 	if debugDerives {
@@ -358,7 +412,7 @@ func (g *ExprGraph) ToDot() string {
 
 func (g *ExprGraph) removeAllEdgesFrom(n *Node) {
 	for k, ns := range g.to {
-		g.to[k] = ns.remove(n)
+		g.to[k] = ns.Remove(n)
 	}
 }
 
@@ -392,7 +446,7 @@ func (g *ExprGraph) Nodes() []graph.Node {
 // AllNodes is like Nodes, but returns Nodes instead of []graph.Node.
 // Nodes() has been reserved for the graph.Directed interface, so this one is named AllNodes instead
 func (g *ExprGraph) AllNodes() Nodes {
-	return g.all
+	return g.all.ToSlice()
 }
 
 // From returns all nodes in g that can be reached directly from n.
